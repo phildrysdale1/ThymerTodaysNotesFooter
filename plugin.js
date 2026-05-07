@@ -1125,6 +1125,28 @@
 
   const PB_LOCK_NAME = 'thymer-ext-plugin-backend-ensure-v1';
   const DATA_ENSURE_P = '__thymerExtDataPluginBackendEnsureP';
+  /** Per-workspace: Plugin Backend already ensured — skip repeat bodies (avoids getAllCollections / lock storms). */
+  const WS_ENSURE_OK_MAP = '__thymerExtPbWorkspaceEnsureOkMap_v1';
+
+  function markWorkspacePluginBackendEnsureDone(data) {
+    try {
+      const slug = workspaceSlugFromData(data);
+      const h = getSharedDeduplicationWindow();
+      if (!h[WS_ENSURE_OK_MAP] || typeof h[WS_ENSURE_OK_MAP] !== 'object') h[WS_ENSURE_OK_MAP] = Object.create(null);
+      h[WS_ENSURE_OK_MAP][slug] = true;
+    } catch (_) {}
+  }
+
+  function isWorkspacePluginBackendEnsureDone(data) {
+    try {
+      const slug = workspaceSlugFromData(data);
+      const h = getSharedDeduplicationWindow();
+      const m = h[WS_ENSURE_OK_MAP];
+      return !!(m && m[slug]);
+    } catch (_) {
+      return false;
+    }
+  }
 
   function dlogPathB(phase, extra) {
     if (!DEBUG_COLLECTIONS) return;
@@ -1199,22 +1221,46 @@
   }
 
   async function runPluginBackendEnsureBody(data) {
+    if (data && isWorkspacePluginBackendEnsureDone(data)) return;
     if (DEBUG_COLLECTIONS) {
       dlogPathB('ensureBody_start', { pathB: pathBWindowSnapshot() });
       try {
         if (data && data.getAllCollections) {
           const a = await data.getAllCollections();
-          const collNames = (Array.isArray(a) ? a : []).map((c) => {
+          const list = Array.isArray(a) ? a : [];
+          const collNames = list.map((c) => {
             try { return String(collectionDisplayName(c) || '').trim() || '(no-name)'; } catch (__) { return '(err)'; }
           });
           dlogPathB('ensureBody_collections', { count: (collNames && collNames.length) || 0, names: (collNames || []).slice(0, 40) });
           if (data && data.getAllCollections) touchGetAllSanityFromCount((collNames && collNames.length) || 0);
+          const dupExact = list.filter((c) => {
+            try {
+              const nm = collectionDisplayName(c);
+              return nm === COL_NAME || nm === COL_NAME_LEGACY;
+            } catch (__) {
+              return false;
+            }
+          });
+          if (dupExact.length > 1) {
+            dlogPathB('duplicate_plugin_backend_named_collections', {
+              count: dupExact.length,
+              guids: dupExact.map((c) => {
+                try {
+                  return c.getGuid?.() || null;
+                } catch (__) {
+                  return null;
+                }
+              }),
+              doc: 'docs/PLUGIN_BACKEND_DUPLICATE_HYGIENE.md',
+            });
+          }
         }
       } catch (e) {
         dlogPathB('ensureBody_getAll_failed', { err: String((e && e.message) || e) });
       }
     }
     try {
+      const markPbOk = () => markWorkspacePluginBackendEnsureDone(data);
       let existing = null;
       for (let attempt = 0; attempt < 4; attempt++) {
         let allAttempt;
@@ -1225,12 +1271,24 @@
         }
         if (allAttempt != null) {
           existing = pickCollFromAll(allAttempt);
-          if (existing) return;
-          if (hasPluginBackendInAll(allAttempt)) return;
+          if (existing) {
+            markPbOk();
+            return;
+          }
+          if (hasPluginBackendInAll(allAttempt)) {
+            markPbOk();
+            return;
+          }
         } else {
           existing = await findColl(data);
-          if (existing) return;
-          if (await hasPluginBackendOnWorkspace(data)) return;
+          if (existing) {
+            markPbOk();
+            return;
+          }
+          if (await hasPluginBackendOnWorkspace(data)) {
+            markPbOk();
+            return;
+          }
         }
         if (attempt < 3) await new Promise((r) => setTimeout(r, 50 + attempt * 50));
       }
@@ -1242,12 +1300,24 @@
       }
       if (allPost != null) {
         existing = pickCollFromAll(allPost);
-        if (existing) return;
-        if (hasPluginBackendInAll(allPost)) return;
+        if (existing) {
+          markPbOk();
+          return;
+        }
+        if (hasPluginBackendInAll(allPost)) {
+          markPbOk();
+          return;
+        }
       } else {
         existing = await findColl(data);
-        if (existing) return;
-        if (await hasPluginBackendOnWorkspace(data)) return;
+        if (existing) {
+          markPbOk();
+          return;
+        }
+        if (await hasPluginBackendOnWorkspace(data)) {
+          markPbOk();
+          return;
+        }
       }
       await new Promise((r) => setTimeout(r, 120));
       let allAfterWait;
@@ -1257,11 +1327,23 @@
         allAfterWait = null;
       }
       if (allAfterWait != null) {
-        if (pickCollFromAll(allAfterWait)) return;
-        if (hasPluginBackendInAll(allAfterWait)) return;
+        if (pickCollFromAll(allAfterWait)) {
+          markPbOk();
+          return;
+        }
+        if (hasPluginBackendInAll(allAfterWait)) {
+          markPbOk();
+          return;
+        }
       } else {
-        if (await findColl(data)) return;
-        if (await hasPluginBackendOnWorkspace(data)) return;
+        if (await findColl(data)) {
+          markPbOk();
+          return;
+        }
+        if (await hasPluginBackendOnWorkspace(data)) {
+          markPbOk();
+          return;
+        }
       }
       let preCreateLen = 0;
       try {
@@ -1286,11 +1368,23 @@
             allPre = null;
           }
           if (allPre != null) {
-            if (pickCollFromAll(allPre)) return;
-            if (hasPluginBackendInAll(allPre)) return;
+            if (pickCollFromAll(allPre)) {
+              markPbOk();
+              return;
+            }
+            if (hasPluginBackendInAll(allPre)) {
+              markPbOk();
+              return;
+            }
           } else {
-            if (await findColl(data)) return;
-            if (await hasPluginBackendOnWorkspace(data)) return;
+            if (await findColl(data)) {
+              markPbOk();
+              return;
+            }
+            if (await hasPluginBackendOnWorkspace(data)) {
+              markPbOk();
+              return;
+            }
           }
         }
         if (isSuspiciousEmptyAfterRecentNonEmptyList(preCreateLen) && preCreateLen === 0) {
@@ -1318,11 +1412,23 @@
           allLease = null;
         }
         if (allLease != null) {
-          if (pickCollFromAll(allLease)) return;
-          if (hasPluginBackendInAll(allLease)) return;
+          if (pickCollFromAll(allLease)) {
+            markPbOk();
+            return;
+          }
+          if (hasPluginBackendInAll(allLease)) {
+            markPbOk();
+            return;
+          }
         } else {
-          if (await findColl(data)) return;
-          if (await hasPluginBackendOnWorkspace(data)) return;
+          if (await findColl(data)) {
+            markPbOk();
+            return;
+          }
+          if (await hasPluginBackendOnWorkspace(data)) {
+            markPbOk();
+            return;
+          }
         }
         const recentAttemptAge = getRecentPluginBackendCreateAttemptAgeMs(data);
         if (recentAttemptAge != null && recentAttemptAge >= 0 && recentAttemptAge < 120000) {
@@ -1336,11 +1442,23 @@
               allCont = null;
             }
             if (allCont != null) {
-              if (pickCollFromAll(allCont)) return;
-              if (hasPluginBackendInAll(allCont)) return;
+              if (pickCollFromAll(allCont)) {
+                markPbOk();
+                return;
+              }
+              if (hasPluginBackendInAll(allCont)) {
+                markPbOk();
+                return;
+              }
             } else {
-              if (await findColl(data)) return;
-              if (await hasPluginBackendOnWorkspace(data)) return;
+              if (await findColl(data)) {
+                markPbOk();
+                return;
+              }
+              if (await hasPluginBackendOnWorkspace(data)) {
+                markPbOk();
+                return;
+              }
             }
           }
           return;
@@ -1357,11 +1475,23 @@
               allSettle = null;
             }
             if (allSettle != null) {
-              if (pickCollFromAll(allSettle)) return;
-              if (hasPluginBackendInAll(allSettle)) return;
+              if (pickCollFromAll(allSettle)) {
+                markPbOk();
+                return;
+              }
+              if (hasPluginBackendInAll(allSettle)) {
+                markPbOk();
+                return;
+              }
             } else {
-              if (await findColl(data)) return;
-              if (await hasPluginBackendOnWorkspace(data)) return;
+              if (await findColl(data)) {
+                markPbOk();
+                return;
+              }
+              if (await hasPluginBackendOnWorkspace(data)) {
+                markPbOk();
+                return;
+              }
             }
           }
         }
@@ -1371,6 +1501,7 @@
           if (DEBUG_COLLECTIONS) {
             dlogPathB('abort_create_exact_backend_name_exists', { exactN, ws: workspaceSlugFromData(data) });
           }
+          markPbOk();
           return;
         }
         const coll = await queueDataCreateOnSharedWindow(() => data.createCollection());
@@ -1388,6 +1519,7 @@
         }
         if (ok === false) return;
         noteRecentPluginBackendCreate(data);
+        markPbOk();
         await new Promise((r) => setTimeout(r, 250));
       } finally {
         try {
@@ -1413,6 +1545,12 @@
   }
 
   function ensurePluginSettingsCollection(data) {
+    if (!data || typeof data.getAllCollections !== 'function' || typeof data.createCollection !== 'function') {
+      return Promise.resolve();
+    }
+    if (isWorkspacePluginBackendEnsureDone(data)) {
+      return Promise.resolve();
+    }
     if (DEBUG_COLLECTIONS) {
       let dHint = 'no-data';
       try {
@@ -1426,9 +1564,6 @@
         dHint = 'err';
       }
       dlogPathB('ensurePluginSettingsCollection', { dataHint: dHint, dataExpand: (() => { try { if (!data) return { ok: false }; return { hasDataEnsure: !!data[DATA_ENSURE_P] }; } catch (_) { return { ok: 'throw' }; } })(), pathB: pathBWindowSnapshot() });
-    }
-    if (!data || typeof data.getAllCollections !== 'function' || typeof data.createCollection !== 'function') {
-      return Promise.resolve();
     }
     try {
       if (!data[DATA_ENSURE_P] || typeof data[DATA_ENSURE_P].then !== 'function') {
@@ -2047,9 +2182,13 @@ class Plugin extends AppPlugin {
     const root = state?.rootEl;
     if (root?.isConnected) {
       const body = root.querySelector('[data-role="body"]');
-      const tgl = root.querySelector('.tn-toggle');
       if (body) body.style.display = 'none';
-      if (tgl) tgl.textContent = '+';
+      this._applyFooterCollapsedVisual(root);
+      const cal = root.querySelector('.tn-calendar-toggle');
+      if (cal) {
+        cal.title = "Show today's notes";
+        cal.setAttribute('aria-expanded', 'false');
+      }
     }
   }
 
@@ -2081,6 +2220,13 @@ class Plugin extends AppPlugin {
   _panelTitleText() {
     const p = String(this._settings?.panelLabel || '').trim();
     return p || "Today's Notes";
+  }
+
+  /** Standalone footer only: dim/bright shell from collapsed state. */
+  _applyFooterCollapsedVisual(root) {
+    if (!root?.classList?.contains?.('tn-footer') || root.classList.contains('tn-footer--suite-embed')) return;
+    const collapsed = !!this._collapsed;
+    root.classList.toggle('tn-footer--collapsed', collapsed);
   }
 
   _syncFooterTitles() {
@@ -2945,9 +3091,13 @@ class Plugin extends AppPlugin {
           this._collapsed = false;
           this._saveBool('tn_footer_collapsed', this._collapsed);
           const body = tnRoot.querySelector('[data-role="body"]');
-          const tgl = tnRoot.querySelector('.tn-toggle');
+          const cal = tnRoot.querySelector('.tn-calendar-toggle');
           if (body) body.style.display = 'block';
-          if (tgl) tgl.textContent = '−';
+          this._applyFooterCollapsedVisual(tnRoot);
+          if (cal) {
+            cal.title = "Hide today's notes";
+            cal.setAttribute('aria-expanded', 'true');
+          }
         }
         this._renderFooterBody(state);
         this._syncTnHeaderExtras(state);
@@ -3342,7 +3492,6 @@ class Plugin extends AppPlugin {
     if (!targetRootEl?.isConnected) return;
     const bodyEl = targetRootEl.querySelector('[data-role="body"]');
     if (!bodyEl) return;
-    const countEl = targetRootEl.querySelector('[data-role="count"]');
     const raw = state._lastMainResults || [];
     const pres = this._effectiveMainPresentation(state);
     const results =
@@ -3357,14 +3506,12 @@ class Plugin extends AppPlugin {
     }
 
     if (!raw.length) {
-      if (countEl) countEl.textContent = '';
       if (!this._timeMachineEnabled()) {
         bodyEl.innerHTML = '<div class="tn-empty">No notes found for this day.</div>';
       }
     } else {
-      if (countEl) countEl.textContent = String(raw.length);
       if (pres === 'main_collapsed') {
-        /* notes hidden via footer cycle; header count unchanged */
+        /* notes hidden via footer cycle */
       } else if (pres === 'chrono') {
         const list = document.createElement('div');
         list.className = 'tn-chrono-body';
@@ -3561,24 +3708,16 @@ class Plugin extends AppPlugin {
     const header = document.createElement('div');
     header.className = 'tn-header';
 
-    const toggle = document.createElement('button');
-    toggle.className   = 'tn-toggle button-none button-small button-minimal-hover';
-    toggle.type        = 'button';
-    toggle.title       = 'Collapse / expand';
-    toggle.textContent = this._collapsed ? '+' : '−';
-
-    const titleIcon = document.createElement('span');
-    titleIcon.className = 'tn-title-icon';
-    try { titleIcon.appendChild(this.ui.createIcon('ti-notes')); }
-    catch (_) { titleIcon.textContent = '📝'; }
-
-    const titleEl = document.createElement('div');
-    titleEl.className   = 'tn-title';
-    titleEl.textContent = this._panelTitleText();
-
-    const countEl = document.createElement('div');
-    countEl.className    = 'tn-count';
-    countEl.dataset.role = 'count';
+    const calToggle = document.createElement('button');
+    calToggle.type = 'button';
+    calToggle.className = 'tn-calendar-toggle button-none button-small button-minimal-hover';
+    calToggle.title = this._collapsed ? "Show today's notes" : "Hide today's notes";
+    calToggle.setAttribute('aria-expanded', String(!this._collapsed));
+    try {
+      calToggle.appendChild(this.ui.createIcon('ti-calendar'));
+    } catch (_) {
+      calToggle.textContent = '📅';
+    }
 
     const collapsedSectionsWrap = document.createElement('span');
     collapsedSectionsWrap.className = 'tn-collapsed-sections-wrap';
@@ -3592,10 +3731,7 @@ class Plugin extends AppPlugin {
     settingsBtn.textContent = '⚙';
     settingsBtn.addEventListener('click', () => this._openSettings());
 
-    header.appendChild(toggle);
-    header.appendChild(titleIcon);
-    header.appendChild(titleEl);
-    header.appendChild(countEl);
+    header.appendChild(calToggle);
     header.appendChild(collapsedSectionsWrap);
     header.appendChild(triHeaderRow);
     header.appendChild(settingsBtn);
@@ -3605,7 +3741,7 @@ class Plugin extends AppPlugin {
     body.className     = 'tn-body';
     body.style.display = this._collapsed ? 'none' : 'block';
 
-    toggle.addEventListener('click', () => {
+    calToggle.addEventListener('click', () => {
       const wasCollapsed = this._collapsed;
       this._collapsed    = !this._collapsed;
       if (!this._collapsed && wasCollapsed) {
@@ -3617,8 +3753,10 @@ class Plugin extends AppPlugin {
         }
       }
       this._saveBool('tn_footer_collapsed', this._collapsed);
-      toggle.textContent = this._collapsed ? '+' : '−';
       body.style.display = this._collapsed ? 'none' : 'block';
+      calToggle.title = this._collapsed ? "Show today's notes" : "Hide today's notes";
+      calToggle.setAttribute('aria-expanded', String(!this._collapsed));
+      this._applyFooterCollapsedVisual(root);
       if (!this._collapsed) {
         this._renderFooterBody(state);
         this._maybeKickTimeMachineLoad(state);
@@ -3630,6 +3768,7 @@ class Plugin extends AppPlugin {
 
     root.appendChild(header);
     root.appendChild(body);
+    this._applyFooterCollapsedVisual(root);
     return root;
   }
 
@@ -4198,10 +4337,17 @@ class Plugin extends AppPlugin {
         margin-top: 16px;
         font-size: 13px;
         color: #e8e0d0;
-        background-color: rgba(30, 30, 36, 0.60);
-        border: 1px solid rgba(255, 255, 255, 0.10);
+        background-color: rgba(40, 40, 48, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.14);
         border-radius: 10px;
         padding: 12px 16px 10px;
+        transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, padding 0.2s ease;
+      }
+      .tn-footer:not(.tn-footer--suite-embed).tn-footer--collapsed {
+        background-color: rgba(18, 18, 22, 0.52);
+        border-color: rgba(255, 255, 255, 0.06);
+        color: rgba(232, 224, 208, 0.82);
+        padding: 8px 16px 8px;
       }
       .tn-footer .tn-header {
         display: flex;
@@ -4210,33 +4356,31 @@ class Plugin extends AppPlugin {
         min-height: 30px;
         margin-bottom: 8px;
       }
-      .tn-footer .tn-toggle {
-        font-size: 13px;
-        line-height: 1;
-        color: #8a7e6a;
-        cursor: pointer;
-        padding: 0 4px;
-        min-width: 18px;
-        flex-shrink: 0;
+      .tn-footer.tn-footer--collapsed .tn-header {
+        margin-bottom: 0;
+        min-height: 26px;
       }
-      .tn-footer .tn-title-icon {
-        color: #8a7e6a;
-        font-size: 14px;
-        flex-shrink: 0;
+      .tn-footer .tn-calendar-toggle {
         display: inline-flex;
         align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        flex-shrink: 0;
+        padding: 0;
+        line-height: 0;
+        color: #d4cdc2;
+        border-radius: 6px;
       }
-      .tn-footer .tn-title {
-        font-weight: 600;
-        font-size: 13px;
-        white-space: nowrap;
-        flex: 1;
+      .tn-footer .tn-calendar-toggle:hover {
+        color: #f0ebe3;
+        background: rgba(255, 255, 255, 0.08);
       }
-      .tn-footer .tn-count {
+      .tn-footer.tn-footer--collapsed .tn-calendar-toggle {
         color: #8a7e6a;
-        font-size: 12px;
-        white-space: nowrap;
-        font-variant-numeric: tabular-nums;
+      }
+      .tn-footer.tn-footer--collapsed .tn-calendar-toggle:hover {
+        color: #c9c0b4;
       }
       .tn-footer .tn-collapsed-sections-wrap {
         display: inline-flex;
@@ -4244,7 +4388,8 @@ class Plugin extends AppPlugin {
         align-items: center;
         gap: 4px;
         justify-content: flex-end;
-        max-width: 42%;
+        flex: 1;
+        min-width: 0;
       }
       .tn-footer .tn-collapsed-chip {
         display: inline-flex;
@@ -4397,16 +4542,21 @@ class Plugin extends AppPlugin {
         text-overflow: ellipsis;
       }
       .tn-footer .tn-collection-icon-emoji { font-size: 14px; line-height: 1; }
-      .tn-footer .tn-settings-btn {
+      .tn-footer .tn-header .tn-settings-btn {
         font-size: 13px;
         color: #8a7e6a;
         cursor: pointer;
         padding: 0 2px;
         opacity: 0;
-        transition: opacity 0.15s;
+        pointer-events: none;
+        transition: opacity 0.15s ease, color 0.12s ease;
       }
-      .tn-footer:hover .tn-settings-btn { opacity: 1; }
-      .tn-footer .tn-settings-btn:hover { color: #e8e0d0; }
+      .tn-footer .tn-header:hover .tn-settings-btn,
+      .tn-footer .tn-header:focus-within .tn-settings-btn {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .tn-footer .tn-header .tn-settings-btn:hover { color: #e8e0d0; }
       .tn-footer .tn-body { padding-bottom: 4px; }
       .tn-footer .tn-loading, .tn-footer .tn-empty {
         font-size: 12px;
