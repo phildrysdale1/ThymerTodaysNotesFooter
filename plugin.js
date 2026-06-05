@@ -4243,6 +4243,114 @@ class Plugin extends AppPlugin {
   }
 
   // =========================================================================
+  // Record navigation (this panel / side panel)
+  // =========================================================================
+
+  _wantsSidePanel(e) {
+    if (!e || typeof e !== 'object') return false;
+    if (e.openInSide === true) return true;
+    if (e.openInSide === false) return false;
+    return !!(e.metaKey || e.ctrlKey);
+  }
+
+  _navigatePanelToRecord(panel, recordGuid, lineGuid, workspaceGuid) {
+    if (!panel || !recordGuid) return Promise.resolve(false);
+    if (!lineGuid) {
+      panel.navigateTo({
+        type: 'edit_panel',
+        rootId: recordGuid,
+        subId: null,
+        workspaceGuid,
+      });
+      return Promise.resolve(true);
+    }
+    try {
+      const result = panel.navigateTo({ itemGuid: lineGuid, highlight: true });
+      if (result && typeof result.then === 'function') {
+        return result.then((found) => found !== false);
+      }
+      return Promise.resolve(result !== false);
+    } catch (_) {
+      return Promise.resolve(false);
+    }
+  }
+
+  _waitForPanelNavigationFrame() {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+  }
+
+  async _openRecord(panel, recordGuid, lineGuid, e) {
+    const workspaceGuid = this.getWorkspaceGuid?.() || null;
+    if (!workspaceGuid || !panel || !recordGuid) return;
+
+    if (this._wantsSidePanel(e)) {
+      try {
+        const newPanel = await this.ui.createPanel({ afterPanel: panel });
+        if (!newPanel) return;
+        this.ui.setActivePanel?.(newPanel);
+        await this._waitForPanelNavigationFrame();
+        await this._navigatePanelToRecord(newPanel, recordGuid, null, workspaceGuid);
+        if (lineGuid) {
+          await this._navigatePanelToRecord(newPanel, recordGuid, lineGuid, workspaceGuid);
+          await this._waitForPanelNavigationFrame();
+          await this._waitForPanelNavigationFrame();
+        }
+      } catch (_) {}
+      return;
+    }
+
+    this._navigatePanelToRecord(panel, recordGuid, lineGuid || null, workspaceGuid);
+    this.ui.setActivePanel?.(panel);
+  }
+
+  _panelNavSvg(kind) {
+    const n = 14;
+    if (kind === 'side') {
+      return '<svg xmlns="http://www.w3.org/2000/svg" width="' + n + '" height="' + n + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1.5" opacity="0.35"/><path d="M14 5v14"/><path d="M7 12h4"/><path d="m9 10 2 2-2 2"/></svg>';
+    }
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="' + n + '" height="' + n + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>';
+  }
+
+  _appendPanelNavIcon(btn, kind) {
+    const wrap = document.createElement('span');
+    wrap.className = 'tn-panel-nav-icon';
+    wrap.innerHTML = this._panelNavSvg(kind);
+    btn.appendChild(wrap);
+  }
+
+  _buildPanelNavActions(recordGuid, lineGuid = '') {
+    const wrap = document.createElement('div');
+    wrap.className = 'tn-panel-nav-actions';
+
+    const here = document.createElement('button');
+    here.type = 'button';
+    here.className = 'tn-panel-nav-btn button-none button-small button-minimal-hover tooltip';
+    here.dataset.action = 'open-here';
+    here.dataset.recordGuid = recordGuid;
+    if (lineGuid) here.dataset.lineGuid = lineGuid;
+    here.title = 'Open in this panel';
+    here.setAttribute('aria-label', 'Open in this panel');
+    this._appendPanelNavIcon(here, 'here');
+
+    const side = document.createElement('button');
+    side.type = 'button';
+    side.className = 'tn-panel-nav-btn button-none button-small button-minimal-hover tooltip';
+    side.dataset.action = 'open-side';
+    side.dataset.recordGuid = recordGuid;
+    if (lineGuid) side.dataset.lineGuid = lineGuid;
+    side.title = 'Open in side panel';
+    side.setAttribute('aria-label', 'Open in side panel');
+    this._appendPanelNavIcon(side, 'side');
+
+    wrap.appendChild(here);
+    wrap.appendChild(side);
+    return wrap;
+  }
+
+  // =========================================================================
   // Click delegation
   // =========================================================================
 
@@ -4273,15 +4381,15 @@ class Plugin extends AppPlugin {
       }
     }
 
-    if (action === 'open-line') {
+    if (action === 'open-line' || action === 'open-here' || action === 'open-side') {
       e.stopPropagation();
       const recordGuid = actionEl.dataset.recordGuid || '';
-      if (recordGuid) {
-        state.panel?.navigateTo({
-          workspaceGuid: this.getWorkspaceGuid(),
-          type: 'edit_panel', rootId: recordGuid, subId: recordGuid,
-        });
-      }
+      const lineGuid = actionEl.dataset.lineGuid || '';
+      if (!recordGuid) return;
+      const navOpts = action === 'open-side'
+        ? { openInSide: true }
+        : (action === 'open-here' ? { openInSide: false } : e);
+      void this._openRecord(state.panel, recordGuid, lineGuid || null, navOpts);
     }
   }
 
@@ -4366,29 +4474,20 @@ class Plugin extends AppPlugin {
 
     const meta = rowMeta || { showCollectionIcon: false, showCollectionName: false };
 
+    const titleCluster = document.createElement('div');
+    titleCluster.className = 'tn-row-title-cluster';
+
     const nameBtn = document.createElement('button');
     nameBtn.type        = 'button';
     nameBtn.className   = 'tn-record-name button-none';
     nameBtn.textContent = item.record.getName() || 'Untitled';
-    nameBtn.addEventListener('click', () => {
-      state.panel?.navigateTo({
-        workspaceGuid: this.getWorkspaceGuid(),
-        type: 'edit_panel', rootId: guid, subId: guid,
-      });
+    nameBtn.title       = 'Open in this panel (⌘/Ctrl-click for side panel)';
+    nameBtn.addEventListener('click', (ev) => {
+      void this._openRecord(state.panel, guid, null, ev);
     });
 
-    const arrow = document.createElement('button');
-    arrow.type      = 'button';
-    arrow.className = 'tn-arrow button-none';
-    arrow.title     = 'Open';
-    try { arrow.appendChild(this.ui.createIcon('ti-arrow-right')); }
-    catch (_) { arrow.textContent = '→'; }
-    arrow.addEventListener('click', () => {
-      state.panel?.navigateTo({
-        workspaceGuid: this.getWorkspaceGuid(),
-        type: 'edit_panel', rootId: guid, subId: guid,
-      });
-    });
+    titleCluster.appendChild(nameBtn);
+    titleCluster.appendChild(this._buildPanelNavActions(guid));
 
     row.appendChild(this._buildExpandRecordBtn(guid, state));
     if (meta.showCollectionIcon || meta.showCollectionName) {
@@ -4411,8 +4510,7 @@ class Plugin extends AppPlugin {
       }
       row.appendChild(strip);
     }
-    row.appendChild(nameBtn);
-    row.appendChild(arrow);
+    row.appendChild(titleCluster);
     groupEl.appendChild(row);
     groupEl.appendChild(this._buildRecordPreviewEl(guid, state));
 
@@ -5049,8 +5147,15 @@ class Plugin extends AppPlugin {
       }
       .tn-footer .tn-record-group:not(.tlr-record-expanded) .tn-row:hover { background: rgba(255,255,255,0.05); }
       .tn-footer .tn-record-group.tlr-record-expanded .tn-row { background: rgba(255,255,255,0.04); border-radius: 6px 6px 0 0; }
+      .tn-footer .tn-row-title-cluster {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
       .tn-footer .tn-record-name {
-        flex: 1;
+        flex: 1 1 auto;
         min-width: 0;
         text-align: left;
         font-size: 13px;
@@ -5062,17 +5167,45 @@ class Plugin extends AppPlugin {
         padding: 0;
       }
       .tn-footer .tn-record-name:hover { color: #fff; }
-      .tn-footer .tn-arrow {
-        opacity: 0;
-        color: #8a7e6a;
-        flex-shrink: 0;
-        font-size: 12px;
-        cursor: pointer;
-        padding: 0;
+      .tn-footer .tn-panel-nav-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        flex: 0 0 auto;
+        opacity: 0.72;
         transition: opacity 0.1s;
       }
-      .tn-footer .tn-row:hover .tn-arrow { opacity: 1; }
-      .tn-footer .tn-arrow:hover { color: #e8e0d0; }
+      .tn-footer .tn-row:hover .tn-panel-nav-actions,
+      .tn-footer .tn-row:focus-within .tn-panel-nav-actions {
+        opacity: 1;
+      }
+      .tn-footer .tn-panel-nav-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border-radius: 5px;
+        color: #8a7e6a;
+        line-height: 1;
+      }
+      .tn-footer .tn-panel-nav-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+      }
+      .tn-footer .tn-panel-nav-icon svg {
+        display: block;
+        width: 14px;
+        height: 14px;
+      }
+      .tn-footer .tn-panel-nav-btn:hover {
+        color: #e8e0d0;
+        background: rgba(255,255,255,0.06);
+      }
 
       .tn-footer .tlr-expand-record-btn {
         display: inline-flex;
